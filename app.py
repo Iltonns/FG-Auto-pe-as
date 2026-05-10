@@ -86,6 +86,16 @@ app = Flask(__name__)
 # Usar SECRET_KEY do .env ou gerar uma aleatória
 app.secret_key = os.getenv('SECRET_KEY', os.urandom(24).hex())
 
+def inicializar_banco_aplicacao():
+    """Garante estrutura mínima do banco para ambiente recém-limpo."""
+    try:
+        init_db()
+        criar_usuario_admin()
+    except Exception:
+        app.logger.exception("Falha ao inicializar estrutura do banco de dados.")
+
+inicializar_banco_aplicacao()
+
 # Dicionário para controlar sessões únicas por usuário
 # Formato: {user_id: session_id}
 active_sessions = {}
@@ -4205,6 +4215,7 @@ def not_found(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    app.logger.exception("Erro interno não tratado: %s", error)
     return render_template('erros/500.html'), 500
 
 # CONTEXTO GLOBAL DO TEMPLATE

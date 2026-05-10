@@ -91,6 +91,23 @@ def add_column_if_not_exists(cursor, conn, table_name, column_definition):
         conn.rollback()
         print(f"Erro ao adicionar coluna {column_definition} na tabela {table_name}: {e}")
 
+def resetar_sequencia_tabela(cursor, table_name, id_column='id'):
+    """Reseta a sequência de IDs de uma tabela PostgreSQL de forma segura."""
+    cursor.execute("SELECT pg_get_serial_sequence(%s, %s)", (table_name, id_column))
+    sequence_name = cursor.fetchone()
+    if sequence_name and sequence_name[0]:
+        cursor.execute(
+            f"""
+            SELECT setval(
+                %s::regclass,
+                COALESCE(MAX({id_column}), 1),
+                MAX({id_column}) IS NOT NULL
+            )
+            FROM {table_name}
+            """,
+            (sequence_name[0],)
+        )
+
 
 def garantir_colunas_clientes():
     """Garante colunas opcionais da tabela clientes para compatibilidade com bancos antigos."""
@@ -1930,8 +1947,8 @@ def limpar_completamente_produtos():
         # Deletar todos os produtos
         cursor.execute("DELETE FROM produtos")
         
-        # Reset do auto increment
-        cursor.execute("DELETE FROM sqlite_sequence WHERE name='produtos'")
+        # Reset do auto increment (PostgreSQL)
+        resetar_sequencia_tabela(cursor, 'produtos')
         
         conn.commit()
         print("✓ Todos os produtos removidos completamente do banco")
@@ -6244,8 +6261,9 @@ def deletar_todas_vendas(restaurar_estoque=True):
         # Deletar vendas
         cursor.execute('DELETE FROM vendas')
         
-        # Reset dos IDs auto-increment
-        cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('vendas', 'itens_venda')")
+        # Reset dos IDs auto-increment (PostgreSQL)
+        resetar_sequencia_tabela(cursor, 'vendas')
+        resetar_sequencia_tabela(cursor, 'itens_venda')
         
         conn.commit()
         return resultado
