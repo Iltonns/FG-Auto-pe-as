@@ -5,7 +5,7 @@ import psycopg2.extras
 import psycopg2.errors
 import os
 from datetime import datetime, date, timedelta
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash, DEFAULT_PBKDF2_ITERATIONS
 from dotenv import load_dotenv
 from math import ceil
 import pytz
@@ -674,6 +674,27 @@ def criar_usuario_admin():
                 permissao_admin = TRUE
             WHERE username = 'admin'
         ''')
+
+        # Auto-reparo: se hash do admin estiver inválido, redefinir senha padrão
+        cursor.execute("SELECT id, password_hash FROM usuarios WHERE username = 'admin' ORDER BY id ASC LIMIT 1")
+        admin = cursor.fetchone()
+        if admin:
+            admin_id, admin_hash = admin
+            hash_invalido = not isinstance(admin_hash, str) or not admin_hash
+
+            if not hash_invalido:
+                try:
+                    check_password_hash(admin_hash, "__validacao_hash_admin__")
+                except Exception:
+                    hash_invalido = True
+
+            if hash_invalido:
+                novo_hash = generate_password_hash('admin123')
+                cursor.execute(
+                    "UPDATE usuarios SET password_hash = %s WHERE id = %s",
+                    (novo_hash, admin_id)
+                )
+                print("Hash inválido do usuário admin corrigido automaticamente.")
         conn.commit()
     
     conn.close()
@@ -800,18 +821,73 @@ def verificar_usuario(username, password):
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    cursor.execute("SELECT id, password_hash, ativo FROM usuarios WHERE username = %s", (username,))
-    user = cursor.fetchone()
-    conn.close()
-    
-    if user and check_password_hash(user[1], password):
+    try:
+        cursor.execute("SELECT id, password_hash, ativo FROM usuarios WHERE username = %s", (username,))
+        user = cursor.fetchone()
+        
+        if not user:
+            return None
+
+        user_id, hash_armazenado, ativo = user
+        senha_valida = False
+        precisa_rehash = False
+
+        # Fluxo principal de validação
+        try:
+            senha_valida = bool(hash_armazenado) and check_password_hash(hash_armazenado, password)
+        except Exception as e:
+            # Hash legado malformado (ex.: '$salt$hash' sem método)
+            print(f"Aviso: hash inválido para usuário {username}: {e}")
+            senha_valida = False
+
+        # Fallback para hashes legados sem método
+        if not senha_valida and isinstance(hash_armazenado, str) and hash_armazenado.startswith('$'):
+            metodos_legados = [
+                f"pbkdf2:sha256:{DEFAULT_PBKDF2_ITERATIONS}",
+                "pbkdf2:sha256:260000",
+                "pbkdf2:sha256:150000",
+                "pbkdf2:sha256:100000",
+                "pbkdf2:sha1:2000",
+                "sha256",
+                "sha1",
+                "md5"
+            ]
+
+            for metodo in metodos_legados:
+                try:
+                    if check_password_hash(f"{metodo}{hash_armazenado}", password):
+                        senha_valida = True
+                        precisa_rehash = True
+                        break
+                except Exception:
+                    continue
+
+        # Fallback final para dados em texto puro (migração defensiva)
+        if not senha_valida and isinstance(hash_armazenado, str) and hash_armazenado == password:
+            senha_valida = True
+            precisa_rehash = True
+
+        if not senha_valida:
+            return None
+
+        if precisa_rehash:
+            try:
+                novo_hash = generate_password_hash(password)
+                cursor.execute("UPDATE usuarios SET password_hash = %s WHERE id = %s", (novo_hash, user_id))
+                conn.commit()
+                print(f"Hash de senha migrado com sucesso para usuário {username}.")
+            except Exception as e:
+                conn.rollback()
+                print(f"Aviso: falha ao migrar hash de senha para usuário {username}: {e}")
+
         # Verificar se o usuário está ativo
-        if user[2]:  # ativo = True
-            return {'id': user[0], 'username': username}
-        else:
-            # Usuário existe mas está inativo
-            return False
-    return None
+        if ativo:
+            return {'id': user_id, 'username': username}
+
+        # Usuário existe mas está inativo
+        return False
+    finally:
+        conn.close()
 
 def buscar_usuario_por_id(user_id):
     """Busca um usuário pelo ID"""
